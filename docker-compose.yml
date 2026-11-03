@@ -18,13 +18,13 @@ services:
   # ─────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
+    container_name: iot_prometheus
     restart: always
     ports:
-      - "9090:9090"
+      - "${IOT_PROMETHEUS_PORT:-9095}:9090"
     volumes:
       - ./prometheus:/etc/prometheus
-      - prometheus_data:/prometheus
+      - iot_prometheus_data:/prometheus
     networks:
       - iot_network
     healthcheck:
@@ -37,25 +37,26 @@ services:
   # ─────────────────────────────────────────────
   # MQTT BRIDGE
   # Subscribe ke MQTT broker, parse JSON, export metrics untuk Prometheus
-  # MQTT broker dikonfigurasi via env var MQTT_BROKER_HOST
+  # Menggunakan Mosquitto MQTT broker yang sudah berjalan di server homelab (:1883)
   # ─────────────────────────────────────────────
   telegraf:
     image: telegraf:1.29
-    container_name: telegraf
+    container_name: iot_telegraf
     restart: unless-stopped
     ports:
-      - "9273:9273"
+      - "${IOT_TELEGRAF_PORT:-9273}:9273"
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
     environment:
-      # - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-10.109.25.97}
-      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-10.109.25.91}
+      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-192.168.25.101}
+      - MQTT_TAILSCALE_HOST=${MQTT_TAILSCALE_HOST:-100.106.63.90}
       - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-useriot}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-25022002}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - iot_network
-    depends_on:
-      prometheus:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9273/metrics"]
       interval: 15s
@@ -66,17 +67,17 @@ services:
   # ─────────────────────────────────────────────
   # VISUALIZATION
   # Reads from Prometheus datasource
-  # Accessible at: http://localhost:3000 (direct)
-  #            and http://localhost/grafana/ (via Nginx proxy)
+  # Accessible at: http://localhost:3003 (direct)
+  #            and http://localhost:8088/grafana/ (via Nginx proxy)
   # ─────────────────────────────────────────────
   grafana:
     image: grafana/grafana:10.4.0
-    container_name: grafana
+    container_name: iot_grafana
     restart: always
     ports:
-      - "3000:3000"
+      - "${IOT_GRAFANA_PORT:-3003}:3000"
     volumes:
-      - grafana_data:/var/lib/grafana
+      - iot_grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
     environment:
@@ -112,7 +113,7 @@ services:
   # ─────────────────────────────────────────────
   api:
     build: ./api
-    container_name: device_mapping_api
+    container_name: iot_device_mapping_api
     restart: always
     ports:
       - "${IOT_API_PORT:-8002}:8000"
@@ -121,10 +122,15 @@ services:
       - ./api/data:/app/data
       - ./api:/app/api
     environment:
-      - PROMETHEUS_URL=http://prometheus:9090
+      - PROMETHEUS_URL=http://host.docker.internal:9001
       - ONLINE_THRESHOLD_MINUTES=${ONLINE_THRESHOLD_MINUTES:-5}
       - PAP_API_URL=${PAP_API_URL:-http://192.168.25.101:8000}
       - PAP_API_KEY=${PAP_API_KEY:-pap_key_iot_dashboard_default_secret_key_2026}
+      - MQTT_BROKER_HOST=${MQTT_BROKER_HOST:-192.168.25.101}
+      - MQTT_TAILSCALE_HOST=${MQTT_TAILSCALE_HOST:-100.106.63.90}
+      - MQTT_BROKER_PORT=${MQTT_BROKER_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-useriot}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-25022002}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -172,8 +178,8 @@ services:
 # NAMED VOLUMES - persist data across restarts
 # ─────────────────────────────────────────────
 volumes:
-  prometheus_data:
-  grafana_data:
+  iot_prometheus_data:
+  iot_grafana_data:
 
 # ─────────────────────────────────────────────
 # INTERNAL NETWORK

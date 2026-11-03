@@ -743,8 +743,14 @@ API untuk manajemen device IoT — mapping **MAC Address ↔ MCID** (Machine ID)
     },
 )
 
-# Prometheus URL - accessible within Docker network
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
+# Prometheus URL - defaults to existing homelab host Prometheus on port 9001 with fallback to container
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://host.docker.internal:9001")
+PROMETHEUS_CANDIDATE_URLS = [
+    PROMETHEUS_URL.rstrip("/"),
+    "http://host.docker.internal:9001",
+    "http://192.168.25.101:9001",
+    "http://prometheus:9090",
+]
 
 # Personal API Platform (Main API / API Utama) configuration
 PAP_API_URL = os.getenv("PAP_API_URL", "http://192.168.25.101:8000")
@@ -793,20 +799,26 @@ def get_db():
 # Internal Helpers — Prometheus Queries
 # ─────────────────────────────────────────────
 
-def _query_prometheus(query: str, timeout: float = 5.0):
-    """Execute PromQL query, return result list or empty list on failure."""
-    try:
-        response = httpx.get(
-            f"{PROMETHEUS_URL}/api/v1/query",
-            params={"query": query},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("status") == "success":
-            return data.get("data", {}).get("result", [])
-    except Exception as e:
-        print(f"[WARN] Prometheus query failed: {e}")
+def _query_prometheus(query: str, timeout: float = 2.0):
+    """Execute PromQL query against existing host Prometheus (:9001) or container Prometheus."""
+    req_timeout = httpx.Timeout(timeout, connect=0.5)
+    seen = set()
+    for base in PROMETHEUS_CANDIDATE_URLS:
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        try:
+            response = httpx.get(
+                f"{base}/api/v1/query",
+                params={"query": query},
+                timeout=req_timeout,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    return data.get("data", {}).get("result", [])
+        except Exception:
+            continue
     return []
 
 
@@ -968,14 +980,21 @@ def sync_with_pap(db: Session) -> dict:
 @app.get("/api/health", response_model=schemas.HealthResponse, tags=["System"])
 def health_check():
     """
-    Health check endpoint. Verifikasi API berjalan, koneksi ke Prometheus, dan koneksi ke Personal API Platform (Main API).
+    Health check endpoint. Verifikasi API berjalan, koneksi ke Prometheus (host :9001 / container), dan koneksi ke Personal API Platform (Main API).
     """
     prometheus_status = "unreachable"
-    try:
-        resp = httpx.get(f"{PROMETHEUS_URL}/-/ready", timeout=2.5)
-        prometheus_status = "ok" if resp.status_code == 200 else "error"
-    except Exception:
-        prometheus_status = "unreachable"
+    seen_prom = set()
+    for base in PROMETHEUS_CANDIDATE_URLS:
+        if not base or base in seen_prom:
+            continue
+        seen_prom.add(base)
+        try:
+            resp = httpx.get(f"{base}/-/ready", timeout=1.5)
+            if resp.status_code == 200:
+                prometheus_status = "ok"
+                break
+        except Exception:
+            continue
 
     pap_status = "unreachable"
     active_pap_url = PAP_API_URL
@@ -998,6 +1017,12 @@ def health_check():
 @app.get("/api/pap/status", tags=["Personal API Platform"])
 def get_pap_connection_status(db: Session = Depends(get_db)):
     """Cek status keterhubungan IoT Dashboard dengan Personal API Platform (API Utama) & Personal Server Manager."""
+    mqtt_info = {
+        "local_host": os.getenv("MQTT_BROKER_HOST", "192.168.25.101"),
+        "tailscale_host": os.getenv("MQTT_TAILSCALE_HOST", "100.106.63.90"),
+        "port": int(os.getenv("MQTT_BROKER_PORT", "1883")),
+        "username": os.getenv("MQTT_USERNAME", "useriot"),
+    }
     hub_resp = _request_pap("GET", "/api/v1/integrations/hub/overview", timeout=2.5)
     if hub_resp is not None and hub_resp.status_code == 200:
         hub_data = hub_resp.json().get("data", {})
@@ -1006,12 +1031,14 @@ def get_pap_connection_status(db: Session = Depends(get_db)):
             "connected": True,
             "main_api": "Personal API Platform",
             "pap_url": active_url,
+            "mqtt_broker": mqtt_info,
             "hub_overview": hub_data,
         }
     return {
         "connected": False,
         "main_api": "Personal API Platform",
         "pap_url": PAP_API_URL,
+        "mqtt_broker": mqtt_info,
         "mode": "local_fallback",
         "local_devices": len(crud.get_devices(db)),
     }

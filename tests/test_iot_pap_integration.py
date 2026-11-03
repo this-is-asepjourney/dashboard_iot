@@ -19,7 +19,13 @@ def test_health_and_pap_status_endpoints():
 
     pap_status = client.get("/api/pap/status")
     assert pap_status.status_code == 200
-    assert pap_status.json()["main_api"] == "Personal API Platform"
+    res_data = pap_status.json()
+    assert res_data["main_api"] == "Personal API Platform"
+    assert "mqtt_broker" in res_data
+    assert res_data["mqtt_broker"]["local_host"] == "192.168.25.101"
+    assert res_data["mqtt_broker"]["tailscale_host"] == "100.106.63.90"
+    assert res_data["mqtt_broker"]["username"] == "useriot"
+    assert res_data["mqtt_broker"]["port"] == 1883
 
 
 def test_devices_hierarchy_and_pap_sync():
